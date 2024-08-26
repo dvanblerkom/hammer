@@ -29,7 +29,7 @@ class SKY130Tech(HammerTechnology):
         # check whether variables were overriden to point to a valid path
         self.use_sram22 = os.path.exists(self.get_setting("technology.sky130.sram22_sky130_macros"))
         self.setup_cdl()
-        # self.setup_verilog()
+        self.setup_verilog()
         self.setup_techlef()
         # self.setup_io_lefs()
         self.logger.info('Loaded Sky130 Tech')
@@ -92,8 +92,8 @@ class SKY130Tech(HammerTechnology):
                 self.logger.info("Modifying Verilog netlist: {} -> {}".format
                     (source_path, dest_path))
                 for line in sf:
-                    line = line.replace('wire 1','// wire 1')
-                    line = line.replace('`endif SKY130_FD_SC_HD__LPFLOW_BLEEDER_FUNCTIONAL_V','`endif // SKY130_FD_SC_HD__LPFLOW_BLEEDER_FUNCTIONAL_V')
+#                    line = line.replace('wire 1','// wire 1')
+#                    line = line.replace('`endif SKY130_FD_SC_HD__LPFLOW_BLEEDER_FUNCTIONAL_V','`endif // SKY130_FD_SC_HD__LPFLOW_BLEEDER_FUNCTIONAL_V')
                     df.write(line)
                     
         # Additionally hack out the specifies
@@ -118,7 +118,7 @@ class SKY130Tech(HammerTechnology):
                 cell_def_range = range(start_idx+1, endif_idx)
                 start_specify_idx = [idx for idx in cell_def_range if "specify" in sl[idx]][0]
                 end_specify_idx = [idx for idx in cell_def_range if "endspecify" in sl[idx]][0]
-                sl[start_specify_idx:end_specify_idx+1] = [] # Dice
+#                sl[start_specify_idx:end_specify_idx+1] = [] # Dice
 
         # Deal with the nonexistent net tactfully (don't code in brittle replacements)
         self.logger.info("Fixing broken net references with select specify blocks.")
@@ -131,11 +131,49 @@ class SKY130Tech(HammerTechnology):
             else: 
                 search_range = range(pattern_tuple[0]+1, len(sl))
             for idx in search_range:
-                list = re.findall(capture_pattern, sl[idx])
-                for elem in list:
+                list_ = re.findall(capture_pattern, sl[idx])
+                for elem in list_:
                     if elem != pattern_tuple[1]:
-                        sl[idx] = sl[idx].replace(elem, pattern_tuple[1])
+#                        sl[idx] = sl[idx].replace(elem, pattern_tuple[1])
                         self.logger.info(f"Incorrect reference `{elem}` to be replaced with: `{pattern_tuple[1]}` on raw line {idx}.")
+
+# setuphold (edge in1,edge in2, skip, skip, skip, skip, skip, out1, out2);        
+# recrem (edge in1,edge in2, skip, skip, skip, skip, skip, out1, out2);        
+
+        pat_setuphold = r"setuphold\s*\(\s*(neg|pos)edge\s+([^,\s]+)\s*,\s*(neg|pos)edge\s+([^,\s]+)\s*,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,\s*([^,\s]+)\s*,\s*([^,\s]+)\s*\)"
+        pat_recrem = r"recrem\s*\(\s*(neg|pos)edge\s+([^,\s]+)\s*,\s*(neg|pos)edge\s+([^,\s]+)\s*,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,\s*([^,\s]+)\s*,\s*([^,\s]+)\s*\)"
+        pat_specify = r"^specify"
+        pat_endspecify = r"^endspecify"
+        specstarts = [idx for idx, value in enumerate(sl) if re.search(pat_specify, value)]
+        specends = [idx for idx, value in enumerate(sl) if re.search(pat_endspecify, value)]
+        specsetups = [(idx, re.findall(pat_setuphold, value)) for idx, value in enumerate(sl) if re.search(pat_setuphold, value)]
+        specrecs = [(idx, re.findall(pat_recrem, value)) for idx, value in enumerate(sl) if re.search(pat_recrem, value)]
+
+        for list_idx, specline in enumerate(specstarts):
+            setupsin = [value for idx, value in specsetups if (idx > specline and idx < specends[list_idx])]
+            recsin = [value for idx, value in specrecs if (idx > specline and idx < specends[list_idx])]
+            if setupsin:
+                bufslist1 = [(plist[0][1], plist[0][4]) for plist in setupsin]
+                bufslist2 = [(plist[0][3], plist[0][5]) for plist in setupsin]
+            else:
+                bufslist1 = []
+                bufslist2 = []
+            if recsin:
+                bufslist3 = [(plist[0][1], plist[0][4]) for plist in recsin]
+                bufslist4 = [(plist[0][3], plist[0][5]) for plist in recsin]
+            else:
+                bufslist3 = []
+                bufslist4 = []
+            allbufs = list(set(bufslist1+bufslist2+bufslist3+bufslist4))
+            if allbufs:
+                addsl = [" buf buf"+str(99-idx)+" ("+ports[1]+","+ports[0]+"); " for idx,ports in enumerate(allbufs)]
+                sl[specline-1] = sl[specline-1] + ' '.join(addsl) + "//CVC MOD!\n"
+
+## also need to change all "SUM" to "SUM_" for CVC SDF problem (SUM is a keyword)
+        sl = [x.replace("SUM","SUM_") for x in sl]
+## also need to get rid of "+=>" and "-=>" in specify blocks
+        sl = [x.replace("+=>","=>") for x in sl]
+        sl = [x.replace("-=>","=>") for x in sl]
                     
         # Write back into destination 
         with open(dest_path, 'w') as df:
@@ -155,7 +193,7 @@ class SKY130Tech(HammerTechnology):
                 self.logger.info("Modifying Verilog netlist: {} -> {}".format
                     (source_path, dest_path))
                 for line in sf:
-                    line = line.replace('`default_nettype none','`default_nettype wire')
+#                    line = line.replace('`default_nettype none','`default_nettype wire')
                     df.write(line)
 
     # Copy and hack the tech-lef, adding this very important `licon` section

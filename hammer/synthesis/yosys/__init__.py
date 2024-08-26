@@ -20,6 +20,7 @@ from pathlib import Path
 import hammer.tech.specialcells as specialcells
 from hammer.tech.specialcells import CellType, SpecialCell
 
+import re
 import os
 import json
 from collections import Counter
@@ -132,12 +133,18 @@ class YosysSynth(HammerSynthesisTool, OpenROADTool, TCLTool):
         match a given corner (voltage/temperature).
         :return: List of lib files separated by spaces
         """
+
+        print(corner)
         pre_filters = optional_map(corner, lambda c: [self.filter_for_mmmc(voltage=c.voltage,
                                                                            temp=c.temp)])  # type: Optional[List[Callable[[hammer_tech.Library],bool]]]
 
         lib_args = self.technology.read_libs([hammer_tech.filters.timing_lib_with_ecsm_filter],
                                              hammer_tech.HammerTechnologyUtils.to_plain_item,
                                              extra_pre_filters=pre_filters)
+
+        pat = self.get_setting("synthesis.yosys.libpat")
+        lib_args = [lib for lib in lib_args if re.search(pat,lib)]
+        print(lib_args)
 
         # lib files are often in a zipped format, so unzip them if they are
         lib_args_unzipped = self.technology.extract_gz_files(lib_args)
@@ -223,6 +230,7 @@ class YosysSynth(HammerSynthesisTool, OpenROADTool, TCLTool):
             raise ValueError("An extra corner is required for Yosys.")
 
         self.liberty_files_tt = self.get_timing_libs(corner_tt)
+        print(self.liberty_files_tt)
 
         self.append("yosys -import")
 
@@ -241,7 +249,13 @@ class YosysSynth(HammerSynthesisTool, OpenROADTool, TCLTool):
         for verilog_file in abspath_input_files:
             self.append(f"read_verilog -sv {verilog_file}")
 
-        liberty_files = self.technology.read_libs([hammer_tech.filters.timing_lib_with_ecsm_filter], hammer_tech.HammerTechnologyUtils.to_plain_item)
+#        liberty_files = self.technology.read_libs([hammer_tech.filters.timing_lib_with_ecsm_filter], hammer_tech.HammerTechnologyUtils.to_plain_item)
+
+#        pat = self.get_setting("synthesis.yosys.libpat")
+#        liberty_files = [lib for lib in liberty_files if re.search(pat,lib)]
+
+        liberty_files = self.liberty_files_tt.split()
+
         for lib_file in liberty_files:
             self.append(f"read_liberty -lib {lib_file}")
 
@@ -269,8 +283,13 @@ class YosysSynth(HammerSynthesisTool, OpenROADTool, TCLTool):
 
         # Technology mapping of flip-flops
         """)
+
+        #this works for sky130...
+        self.verbose_append("dfflegalize -cell \$_DFF_P_ 0 -cell \$_DFF_NN0_ 0 -cell \$_DFF_PN0_ 0 -cell \$_DFF_PN1_ 0 -cell \$_DFFSR_NNN_ 0 -cell \$_DFFSR_PNN_ 0")
+
         for liberty_file in self.liberty_files_tt.split():
             self.verbose_append(f"dfflibmap -map-only -liberty {liberty_file}")
+
         self.verbose_append("opt")
 
         self.write_sdc_file()
@@ -284,6 +303,7 @@ class YosysSynth(HammerSynthesisTool, OpenROADTool, TCLTool):
         # ABC supports multiple liberty files, but the hook from Yosys to ABC doesn't
         # TODO: this is a bad way of getting one liberty file, need a way to merge all std cell lib files
         # NOTE: this breaks for any PDK that has multiple LIB files for std cell library
+
         abc -D {self.clock_period} \\
             -constr "{self.mapped_sdc_path}" \\
             -liberty "{self.liberty_files_tt.split()[0]}" \\

@@ -16,3 +16,5 @@ synthesis.yosys:
   # Used by Yosys to do technology mapping of latches
   # Should be set in technology plugin
   latch_map_file: Optional[str]
+
+  libpat: str

@@ -1,0 +1,4 @@
+cvc:
+  # Directory where cvc tool is installed.
+  cvc_home: ""
+
