@@ -203,6 +203,10 @@ class OpenROADPlaceAndRoute(OpenROADPlaceAndRouteTool):
         return self.open_chip_script + ".tcl"
 
     @property
+    def pass2_chip_tcl(self) -> str:
+        return self.open_chip_script + "_pass2.tcl"
+
+    @property
     def openroad_latest_log(self) -> str:
         return os.path.join(self.run_dir,"openroad.log")
 
@@ -289,8 +293,8 @@ class OpenROADPlaceAndRoute(OpenROADPlaceAndRouteTool):
             if not os.path.isfile(self.output_sim_netlist_filename):
                 raise ValueError("Output sim netlist %s not found" % (self.output_sim_netlist_filename))
 
-            if not os.path.isfile(self.output_sdf_path):
-                raise ValueError("Output SDF %s not found" % (self.output_sdf_path))
+#            if not os.path.isfile(self.output_sdf_path):
+#                raise ValueError("Output SDF %s not found" % (self.output_sdf_path))
 
             for spef_path in self.output_spef_paths:
                 if not os.path.isfile(spef_path):
@@ -492,6 +496,86 @@ class OpenROADPlaceAndRoute(OpenROADPlaceAndRouteTool):
 
         return '\n'.join(cmds)
 
+    def pass2(self) -> str:
+        cmds: List[str] = []
+        self.block_tcl_append(f"""
+        set db_name latest
+        set timing 1
+
+        if {{$timing}} {{
+            {indent(self.read_liberty(), prefix=3*4*' ').strip()}
+        }}
+
+        """, cmds, clean=True, verbose=False)
+
+        # cmds.append(self.read_liberty())
+        self.block_tcl_append("""
+        puts "Reading $db_name database..."
+        read_db $db_name
+        """, cmds, clean=True, verbose=False)
+
+        step_names = [s.name for s in self.steps]
+        self.block_tcl_append(f"""
+        # Determine step & index
+        set steps {{ {' '.join(step_names)} }}
+        """, cmds, clean=True, verbose=False)
+        self.block_tcl_append("""
+        set step [string map {pre_ ""} $db_name]
+        set step [string map {post_ ""} $step]
+        set step_idx [lsearch $steps $step]
+        if { [string range $db_name 0 3] == "pre_" } {
+            set step_idx [expr $step_idx - 1]
+        }
+        set step [lindex $steps $step_idx]
+        """, cmds, clean=True, verbose=False)
+
+        spef_file  = self.output_spef_paths[0]
+        self.block_tcl_append(f"""
+        if {{$timing}} {{
+            # TODO: need to read a later SDC with updated clock constraints?
+            {indent(self.read_sdc(), prefix=3*4*' ').strip()}
+            {self.set_rc()}
+            if {{ $step_idx >= [lsearch $steps "clock_tree"] }} {{
+                puts "Post-CTS, propagate clocks..."
+                set_propagated_clock [all_clocks]
+            }}
+
+            if {{ ($step_idx >= [lsearch $steps "extraction"]) && ([file exists {spef_file}] == 1) }} {{
+                puts "Post-extraction, reading SPEF..."
+                {indent(self.read_spef(), prefix=4*4*' ').strip()}
+            }} elseif {{ $step_idx >= [lsearch $steps "global_route"] }} {{
+                puts "Post-global_route & pre-extraction, estimating parasitics from global route..."
+                estimate_parasitics -global_routing
+            }} elseif {{ $step_idx >= [lsearch $steps "global_placement"] }} {{
+                puts "Post-global_placement & pre-global_route, estimating parasitics from placement..."
+                estimate_parasitics -placement
+            }}
+        }}
+        """, cmds, clean=True, verbose=False)
+        self.block_tcl_append("""
+        if {$timing} {
+            puts "Timing information loaded."
+        } else {
+            puts "Timing information not loaded."
+            puts "  To load database with timing information, run: "
+            puts "  ./generated_scripts/open_chip \[db_name\] timing"
+        }
+        puts "Loaded Step $step_idx: $step ($db_name)."
+
+        """, cmds, clean=True, verbose=False)
+
+        self.block_tcl_append(f"""
+        # Write SDF  
+        {self.write_sdf()}
+        # Write Reports
+        source {self.write_reports_tcl}
+        write_reports final
+        exit
+        """, cmds, clean=True, verbose=False)
+
+        return '\n'.join(cmds)
+
+
     #=========================================================================
     # useful subroutines
     #=========================================================================
@@ -517,6 +601,9 @@ class OpenROADPlaceAndRoute(OpenROADPlaceAndRouteTool):
         # Create open_chip script pointing to latest (symlinked to post_<last ran step>).
         with open(self.open_chip_tcl, "w") as f:
             f.write(self.gui())
+
+        with open(self.pass2_chip_tcl, "w") as f:
+            f.write(self.pass2())
 
         with open(self.open_chip_script, "w") as f:
             f.write(dedent(f"""\
@@ -577,12 +664,22 @@ class OpenROADPlaceAndRoute(OpenROADPlaceAndRouteTool):
             "-exit",                # exit after reading par_tcl_filename
             par_tcl_filename
         ]
+        args2 = [
+            self.get_setting('par.openroad.openroad_bin'),
+            "-no_init",             # do not read .openroad init file
+            "-log", self.openroad_log,
+            "-threads", num_threads,
+            "-metrics", self.metrics_file,
+            "-exit",                # exit after reading par_tcl_filename
+            self.pass2_chip_tcl
+        ]
         if bool(self.get_setting('par.openroad.generate_only')):
             self.logger.info("Generate-only mode: command-line is " + " ".join(args))
         else:
             output = self.run_executable(args, cwd=self.run_dir)
             if not self.created_archive and self.create_archive_mode  == "always":
                 self.create_archive(output,0)  # give it a zero exit code to indicate OpenROAD didn't error before this
+            output = self.run_executable(args2, cwd=self.run_dir)
         # create reports
         self.log_to_reports()
         # copy openroad-{timestamp}.log to openroad.log
@@ -1364,6 +1461,7 @@ class OpenROADPlaceAndRoute(OpenROADPlaceAndRouteTool):
             -output_drc {self.run_dir}/{self.top_module}_route_drc.rpt \\
             -output_maze {self.run_dir}/{self.top_module}_maze.log \\
             -save_guide_updates \\
+            -droute_end_iter 16 \\
             -verbose 1
         """)
         return True
@@ -1591,8 +1689,8 @@ class OpenROADPlaceAndRoute(OpenROADPlaceAndRouteTool):
     def log_to_reports(self) -> bool:
         ''' Parse OpenROAD log to create reports
         '''
-        if not self.get_setting('par.openroad.write_reports'):
-            return True
+#        if not self.get_setting('par.openroad.write_reports'):
+#            return True
         with open(self.openroad_log,'r') as f:
             writing_rpt = False
             rpt: List[str] = []
@@ -1638,8 +1736,8 @@ class OpenROADPlaceAndRoute(OpenROADPlaceAndRouteTool):
         # GDS streamout.
         {self.write_gds()}
 
-        # Write SDF
-        {self.write_sdf()}
+        # Write SDF  -- skip, crashing openroad when running from hammer, not sure why?
+        ## {self.write_sdf()}
 
         """)
 
